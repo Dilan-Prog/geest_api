@@ -1,0 +1,90 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          Int              @id @default(autoincrement())
+  name        String
+  lastName    String
+  email       String           @unique
+  createdAt   DateTime         @default(now())
+  assignments TaskAssignment[]
+
+  @@map("users")
+}
+
+model Task {
+  id          Int       @id @default(autoincrement())
+  title       String
+  description String?
+  status      String    @default("open") // "open" | "archived"
+  createdAt   DateTime  @default(now())
+  archivedAt  DateTime?
+
+  /// Fecha límite opcional. Alimenta el campo calculado `urgency` y el job de avisos.
+  dueDate DateTime?
+
+  /// Marca de que ya se envió el aviso "task.due_soon" de esta tarea.
+  /// Es el candado que impide que el job vuelva a notificar en cada pasada:
+  /// se reclama con un UPDATE condicional, igual que el archivado.
+  dueSoonNotifiedAt DateTime?
+
+  assignments   TaskAssignment[]
+  notifications NotificationAttempt[]
+
+  // El job de vencimientos filtra por status + dueDate en cada pasada.
+  @@index([status, dueDate])
+  @@map("tasks")
+}
+
+model TaskAssignment {
+  id          Int       @id @default(autoincrement())
+  taskId      Int
+  userId      Int
+  completed   Boolean   @default(false)
+  completedAt DateTime?
+  task        Task      @relation(fields: [taskId], references: [id])
+  user        User      @relation(fields: [userId], references: [id])
+
+  @@unique([taskId, userId])
+  @@map("task_assignments")
+}
+
+model NotificationAttempt {
+  id     Int @id @default(autoincrement())
+  taskId Int
+
+  /// "task.archived" | "task.due_soon". Sin esto no se podrían distinguir los
+  /// intentos de archivado de los avisos de vencimiento en la misma bitácora.
+  eventType String @default("task.archived")
+
+  attemptNumber Int
+  timestamp     DateTime @default(now())
+  httpStatus    Int?
+  success       Boolean  @default(false)
+  task          Task     @relation(fields: [taskId], references: [id])
+
+  @@index([taskId, eventType])
+  @@map("notification_attempts")
+}
+
+model IdempotencyKey {
+  id             Int      @id @default(autoincrement())
+  key            String
+  endpoint       String
+  requestHash    String
+  responseStatus Int?
+  responseBody   String?  @db.Text
+  createdAt      DateTime @default(now())
+
+  @@unique([key, endpoint])
+  @@map("idempotency_keys")
+}

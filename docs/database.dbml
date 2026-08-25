@@ -1,0 +1,112 @@
+// ============================================================
+// RETO GEEST — Esquema de base de datos (MySQL 8 / InnoDB)
+// Generado a partir de prisma/migrations/20260824053725_init
+// Visualizar en: https://dbdiagram.io/d
+// ============================================================
+
+Project geest_api {
+  database_type: 'MySQL'
+  Note: '''
+    Sistema de gestión de trabajo.
+    Una tarea se asigna a varios usuarios; cada uno completa su parte.
+    Cuando todos terminan, la tarea se archiva y se notifica al sistema
+    del cliente con hasta 3 reintentos registrados.
+  '''
+}
+
+Table users {
+  id        int          [pk, increment]
+  name      varchar(191) [not null]
+  lastName  varchar(191) [not null]
+  email     varchar(191) [not null, unique, note: 'Validado en la capa API']
+  createdAt datetime(3)  [not null, default: `CURRENT_TIMESTAMP(3)`]
+
+  Note: 'Personas que pueden recibir asignaciones de tareas.'
+}
+
+Table tasks {
+  id          int          [pk, increment]
+  title       varchar(191) [not null]
+  description varchar(191) [null, note: 'Opcional según el reto']
+  status      varchar(191) [not null, default: 'open', note: 'open | archived']
+  createdAt   datetime(3)  [not null, default: `CURRENT_TIMESTAMP(3)`]
+  archivedAt  datetime(3)  [null, note: 'Se llena al archivar; NULL mientras está abierta']
+
+  // --- Mejora extra: alertas de vencimiento ---
+  dueDate           datetime(3) [null, note: 'Fecha límite opcional. Alimenta el semáforo urgency y el job de avisos.']
+  dueSoonNotifiedAt datetime(3) [null, note: 'Candado del job: se reclama con un UPDATE condicional para no avisar dos veces.']
+
+  indexes {
+    (status, dueDate) [name: 'tasks_status_dueDate_idx']
+  }
+
+  Note: '''
+    Trabajo a realizar. Nace en "open" y pasa a "archived" cuando todos los
+    asignados completan su parte.
+
+    El campo calculado `urgency` (green/yellow/red) NO se almacena: se deriva
+    de `dueDate` en cada lectura, así nunca queda obsoleto.
+  '''
+}
+
+Table task_assignments {
+  id          int         [pk, increment]
+  taskId      int         [not null, ref: > tasks.id]
+  userId      int         [not null, ref: > users.id]
+  completed   boolean     [not null, default: false]
+  completedAt datetime(3) [null]
+
+  indexes {
+    (taskId, userId) [unique, name: 'task_assignments_taskId_userId_key']
+  }
+
+  Note: '''
+    Tabla intermedia N:M entre users y tasks.
+    No es una tabla puente simple: guarda el progreso individual
+    (completed / completedAt), que es el dato central del reto.
+    El UNIQUE(taskId, userId) impide duplicar la asignación aunque
+    lleguen dos requests en paralelo.
+  '''
+}
+
+Table notification_attempts {
+  id            int          [pk, increment]
+  taskId        int          [not null, ref: > tasks.id]
+  eventType     varchar(191) [not null, default: 'task.archived', note: 'task.archived | task.due_soon']
+  attemptNumber int          [not null, note: '1, 2 o 3']
+  timestamp     datetime(3)  [not null, default: `CURRENT_TIMESTAMP(3)`]
+  httpStatus    int          [null, note: 'NULL si no hubo respuesta (timeout / red caída)']
+  success       boolean      [not null, default: false]
+
+  indexes {
+    (taskId, eventType) [name: 'notification_attempts_taskId_eventType_idx']
+  }
+
+  Note: '''
+    Bitácora de cada intento de POST hacia NOTIFY_URL.
+    Se expone tal cual en GET /tasks/:idTask/notifications.
+
+    `eventType` es lo único que distingue el aviso de archivado del aviso de
+    vencimiento: ambos comparten el mismo motor de reintentos.
+  '''
+}
+
+Table idempotency_keys {
+  id             int          [pk, increment]
+  key            varchar(191) [not null, note: 'Header Idempotency-Key']
+  endpoint       varchar(191) [not null, note: 'Ej: POST /tasks/7/complete']
+  requestHash    varchar(191) [not null, note: 'SHA-256 del body: detecta reuso de key con cuerpo distinto']
+  responseStatus int          [null, note: 'NULL mientras la petición original sigue en vuelo']
+  responseBody   text         [null, note: 'Respuesta guardada para replicarla en el duplicado']
+  createdAt      datetime(3)  [not null, default: `CURRENT_TIMESTAMP(3)`]
+
+  indexes {
+    (key, endpoint) [unique, name: 'idempotency_keys_key_endpoint_key']
+  }
+
+  Note: '''
+    Sin FK a ninguna tabla: es infraestructura transversal, no dominio.
+    El INSERT sobre el UNIQUE(key, endpoint) es la carrera que decide
+    qué request procesa y cuál espera y replica la respuesta.
+  '''
+}
